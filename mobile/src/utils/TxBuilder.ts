@@ -26,6 +26,11 @@ export class TxBuilder {
             // 1. Initialize Wallet (Cold)
             const wallet = new ethers.Wallet(privateKey);
 
+            // 1.5 Validate Address to prevent ENS Resolution (Offline)
+            if (!ethers.isAddress(to)) {
+                throw new Error(`Invalid Address format: ${to}`);
+            }
+
             // 2. Format Values
             const value = ethers.parseEther(amountEth);
             const gasPrice = ethers.parseUnits(manualGasPriceGwei, "gwei");
@@ -37,16 +42,21 @@ export class TxBuilder {
                 nonce: manualNonce,
                 gasLimit: DEFAULT_GAS_LIMIT,
                 gasPrice,
-                chainId: 11155111, // Sepolia ID (Hardcoded for MVP, should be dynamic)
+                chainId: 31337, // Hardhat Localhost Chain ID
+                // chainId: 11155111, // Sepolia ID
             };
 
             // 4. Sign Locally
+            // Yield to avoid blocking UI during heavy crypto math
+            await new Promise(resolve => setTimeout(resolve, 0));
+
             const signedTx = await wallet.signTransaction(tx);
             return signedTx;
 
-        } catch (error) {
+        } catch (error: any) {
             console.error("TxBuilder Error:", error);
-            throw new Error("Failed to sign transaction offline.");
+            // Throw the actual error so the UI can show it (e.g., "invalid decimal value")
+            throw new Error(`TxBuilder: ${error.message}`);
         }
     }
 

@@ -4,6 +4,9 @@ import {
     ActivityIndicator, Platform
 } from 'react-native';
 import * as Linking from 'expo-linking';
+import { LinearGradient } from 'expo-linear-gradient';
+import { BlurView } from 'expo-blur';
+import * as Haptics from 'expo-haptics';
 
 import { useEchoTheme } from '../hooks/useEchoTheme';
 import { TxBuilder } from '../utils/TxBuilder';
@@ -17,27 +20,32 @@ export const SendScreen = () => {
     const [amount, setAmount] = useState('0.001');
     const [nonce, setNonce] = useState('0');
     const [relayNumber, setRelayNumber] = useState('+15550000000');
+    // Default to a generic IP placeholder to encourage user to change it
+    const [relayUrl, setRelayUrl] = useState(Platform.OS === 'android' ? 'http://172.22.67.110:3000/sms-incoming' : 'http://localhost:3000/sms-incoming');
 
     const [wallet, setWallet] = useState<any>(null);
     const [signedPayload, setSignedPayload] = useState('');
     const [status, setStatus] = useState('Ready');
     const [loading, setLoading] = useState(false);
 
-    // Helper: Create temporary wallet if none exists (Dev Mode)
     const ensureWallet = async () => {
         if (!wallet) {
             setLoading(true);
             const w = await generateWallet();
             setWallet(w);
             setLoading(false);
-            Alert.alert("Dev Wallet Created", "A temporary wallet has been generated for this session.");
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         }
     };
 
     const handleSign = async () => {
-        if (!wallet) return Alert.alert("No Wallet", "Please create/import a wallet first.");
+        if (!wallet) {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+            return Alert.alert("Authentication Required", "Please verify your Identity first.");
+        }
         setLoading(true);
-        setStatus('Signing Offline...');
+        setStatus('Signing...');
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
         try {
             const rawTx = await TxBuilder.constructAndSign(
@@ -46,13 +54,13 @@ export const SendScreen = () => {
                 amount,
                 parseInt(nonce)
             );
-
             setSignedPayload(rawTx);
-            setStatus('Payload Signed');
+            setStatus('Signed Encrypted');
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         } catch (e: any) {
             console.error(e);
-            setStatus('Error Signing');
-            Alert.alert("Signing Error", e.message);
+            setStatus('Error');
+            Alert.alert("Error", e.message);
         } finally {
             setLoading(false);
         }
@@ -60,166 +68,183 @@ export const SendScreen = () => {
 
     const handleTransmit = async () => {
         if (!signedPayload) return;
+        Haptics.selectionAsync();
 
-        setStatus('Processing...');
         try {
-            // 1. Compress
             const compressed = CompressionUtils.compress(signedPayload);
-
-            // 2. Split (Phase 5)
             const parts = CompressionUtils.splitForSMS(compressed);
 
             if (parts.length > 1) {
-                Alert.alert("Large Payload", `This tx requires ${parts.length} SMS messages. Send them sequentially?`, [
+                Alert.alert("Large Payload", `Requires ${parts.length} SMS packets.`, [
                     { text: "Cancel", style: "cancel" },
-                    { text: "Send All", onPress: () => sendSequential(parts) }
+                    { text: "Proceed", onPress: () => openSMS(parts[0]) }
                 ]);
             } else {
                 openSMS(parts[0]);
             }
-
         } catch (e) {
-            console.error(e);
-            setStatus('Error');
+            setStatus('Compression Failed');
         }
-    };
-
-    const sendSequential = async (parts: string[]) => {
-        // For Demo: Open the first part.
-        openSMS(parts[0]);
-        setStatus(`Sent Part 1/${parts.length}`);
     };
 
     const openSMS = async (body: string) => {
         const smsUrl = `sms:${relayNumber}${Platform.OS === 'ios' ? '&' : '?'}body=${encodeURIComponent(body)}`;
         await Linking.openURL(smsUrl);
-        setStatus('Sent to SMS App');
+        setStatus('Sent to Carrier');
     };
 
     const handleSimulate = async () => {
-        if (!signedPayload) return;
+        if (!signedPayload) {
+            Alert.alert("Action Required", "Please SIGN the payload first.");
+            return;
+        }
 
-        setStatus('Simulating Network...');
+        setStatus('Contacting Node...');
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+
+        console.log(`[Simulate] Sending to: ${relayUrl}`);
+
         try {
-            // 1. Compress
             const compressed = CompressionUtils.compress(signedPayload);
+            const mockBody = { From: "+1555VIP", Body: compressed };
 
-            // 2. Prepare Mock Webhook Payload
-            const mockBody = {
-                From: "+1555DevUser", // Mock Sender
-                Body: compressed
-            };
+            // TIMEOUT PROTECTOR
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s timeout
 
-            // 3. Send HTTP Request to Local Node
-            // Android Emulator uses 10.0.2.2 for localhost
-            // iOS Simulator and Web use localhost
-            const url = Platform.OS === 'android' ? 'http://10.0.2.2:3000/sms-incoming' : 'http://localhost:3000/sms-incoming';
-
-            console.log(`Sending to ${url}...`);
-
-            const response = await fetch(url, {
+            const response = await fetch(relayUrl, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(mockBody)
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(mockBody),
+                signal: controller.signal
             });
 
+            clearTimeout(timeoutId);
+
             const text = await response.text();
-            Alert.alert("Relay Response", text);
-            setStatus('Simulation Sent');
+            Alert.alert("✅ Node Response", text);
+            setStatus('Confirmed');
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
         } catch (e: any) {
-            console.error(e);
-            Alert.alert("Simulation Error", "Is the Relay Node running? " + e.message);
-            setStatus('Sim Failed');
+            console.error("Simulation Error:", e);
+            setStatus('Failed');
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+
+            let errorMsg = e.message;
+            if (e.name === 'AbortError') errorMsg = "Connection Timed Out (5s). Check IP.";
+            if (e.message.includes('Network request failed')) errorMsg = "Network Unreachable.\n\n1. Check IP Address matches Laptop.\n2. Disable Laptop Firewall.\n3. Ensure Phone & Laptop on same WiFi.";
+
+            Alert.alert("❌ Simulation Failed", `URL: ${relayUrl}\n\nError: ${errorMsg}`);
         }
     };
 
+    // --- UI COMPONENTS ---
+
+    const GlassCard = ({ children, title }: any) => (
+        <View style={[styles.glassCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, shadowColor: theme.shadow }]}>
+            {/* BlurView works best on iOS, fallback on Android */}
+            <BlurView intensity={theme.mode === 'online' ? 20 : 10} tint={theme.mode === 'online' ? 'light' : 'dark'} style={StyleSheet.absoluteFill} />
+            <View style={styles.cardContent}>
+                {title && <Text style={[styles.cardTitle, { color: theme.secondary }]}>{title}</Text>}
+                {children}
+            </View>
+        </View>
+    );
+
+    const LavishInput = ({ label, value, onChange, placeholder, keyboardType = 'default' }: any) => (
+        <View style={styles.inputContainer}>
+            <Text style={[styles.inputLabel, { color: theme.secondary }]}>{label}</Text>
+            <TextInput
+                style={[styles.input, { color: theme.text, borderBottomColor: theme.secondary }]}
+                value={value}
+                onChangeText={onChange}
+                placeholder={placeholder}
+                placeholderTextColor={theme.placeholder}
+                keyboardType={keyboardType}
+                autoCapitalize="none"
+            />
+        </View>
+    );
+
     return (
         <View style={styles.container}>
-            {/* Wallet Section */}
-            <View style={[styles.section, { borderColor: theme.borderColor, backgroundColor: theme.cardBg }]}>
-                <Text style={[styles.header, { color: theme.text }]}>SENDER IDENTITY</Text>
+
+            {/* 1. Identity Card */}
+            <GlassCard title="IDENTITY">
                 {wallet ? (
-                    <Text style={[styles.value, { color: theme.accent }]}>{wallet.address.slice(0, 10)}...</Text>
+                    <View style={styles.identityRow}>
+                        <View style={[styles.avatar, { backgroundColor: theme.accent }]} />
+                        <View>
+                            <Text style={[styles.address, { color: theme.text }]}>{wallet.address.slice(0, 8)}...{wallet.address.slice(-6)}</Text>
+                            <Text style={[styles.statusTag, { color: theme.accent }]}>● VERIFIED SESSION</Text>
+                        </View>
+                    </View>
                 ) : (
-                    <TouchableOpacity onPress={ensureWallet} style={[styles.btnSmall, { borderColor: theme.accent }]}>
-                        <Text style={{ color: theme.accent, fontWeight: 'bold' }}>GENERATE SESSION WALLET</Text>
+                    <TouchableOpacity style={[styles.goldBtn, { borderColor: theme.accent }]} onPress={ensureWallet}>
+                        <Text style={[styles.goldBtnText, { color: theme.accent }]}>GENERATE SECURE KEY</Text>
                     </TouchableOpacity>
                 )}
-            </View>
+            </GlassCard>
 
-            {/* Inputs */}
-            <View style={[styles.section, { borderColor: theme.borderColor, backgroundColor: theme.cardBg }]}>
-                <Text style={[styles.header, { color: theme.text }]}>TRANSACTION PARAMS</Text>
-
-                <Text style={[styles.label, { color: theme.subtext }]}>TO (Address):</Text>
-                <TextInput
-                    style={[styles.input, { color: theme.text, borderColor: theme.subtext }]}
-                    value={recipient} onChangeText={setRecipient} placeholder="0x..." placeholderTextColor={theme.subtext}
-                />
-
+            {/* 2. Transaction Card */}
+            <GlassCard title="CONSTRUCT">
+                <LavishInput label="RECIPIENT ADDRESS" value={recipient} onChange={setRecipient} placeholder="0x..." />
                 <View style={styles.row}>
-                    <View style={{ flex: 1, marginRight: 10 }}>
-                        <Text style={[styles.label, { color: theme.subtext }]}>AMOUNT (ETH):</Text>
-                        <TextInput
-                            style={[styles.input, { color: theme.text, borderColor: theme.subtext }]}
-                            value={amount} onChangeText={setAmount} keyboardType="numeric"
-                        />
+                    <View style={{ flex: 1, marginRight: 15 }}>
+                        <LavishInput label="AMOUNT (ETH)" value={amount} onChange={setAmount} keyboardType="numeric" />
                     </View>
                     <View style={{ flex: 1 }}>
-                        <Text style={[styles.label, { color: theme.subtext }]}>NONCE:</Text>
-                        <TextInput
-                            style={[styles.input, { color: theme.text, borderColor: theme.subtext }]}
-                            value={nonce} onChangeText={setNonce} keyboardType="numeric"
-                        />
+                        <LavishInput label="NONCE" value={nonce} onChange={setNonce} keyboardType="numeric" />
                     </View>
                 </View>
+            </GlassCard>
 
-                <Text style={[styles.label, { color: theme.subtext, marginTop: 10 }]}>RELAY NODE #:</Text>
+            {/* 3. Relay Settings (Compact) */}
+            <View style={{ marginVertical: 10 }}>
+                <Text style={[styles.miniHeader, { color: theme.secondary }]}>RELAY CONFIG</Text>
                 <TextInput
-                    style={[styles.input, { color: theme.text, borderColor: theme.subtext }]}
-                    value={relayNumber} onChangeText={setRelayNumber} keyboardType="phone-pad"
+                    style={[styles.miniInput, { color: theme.secondary, backgroundColor: theme.cardBg }]}
+                    value={relayUrl} onChangeText={setRelayUrl}
+                    autoCapitalize="none"
                 />
-
             </View>
 
-            {/* Actions */}
-            <View style={[styles.section, { borderColor: theme.borderColor, backgroundColor: theme.cardBg, borderLeftWidth: 4, borderLeftColor: theme.accent }]}>
-                <Text style={[styles.status, { color: theme.accent }]}>STATUS: {status}</Text>
-
-                {loading && <ActivityIndicator size="small" color={theme.accent} style={{ marginVertical: 10 }} />}
-
+            {/* 4. Action Deck */}
+            <View style={styles.actionDeck}>
                 {!signedPayload ? (
                     <TouchableOpacity
-                        style={[styles.btn, { backgroundColor: theme.background, borderColor: theme.accent }]}
+                        activeOpacity={0.8}
+                        style={[styles.actionBtn, { backgroundColor: theme.text, shadowColor: theme.accent }]}
                         onPress={handleSign}
                     >
-                        <Text style={[styles.btnText, { color: theme.accent }]}>SIGN (OFFLINE)</Text>
+                        {loading ? <ActivityIndicator color={theme.background[0]} /> : (
+                            <Text style={[styles.actionBtnText, { color: theme.background[0] }]}>SIGN PAYLOAD</Text>
+                        )}
                     </TouchableOpacity>
                 ) : (
                     <View>
-                        <Text numberOfLines={1} style={[styles.hash, { color: theme.subtext }]}>{signedPayload.slice(0, 30)}...</Text>
-
-                        <TouchableOpacity
-                            style={[styles.btn, { backgroundColor: theme.accent, borderColor: theme.accent }]}
-                            onPress={handleTransmit}
+                        <LinearGradient
+                            colors={[theme.accent, theme.statusColor]}
+                            start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+                            style={styles.gradientBtn}
                         >
-                            <Text style={[styles.btnText, { color: '#000' }]}>TRANSMIT VIA SMS</Text>
-                        </TouchableOpacity>
+                            <TouchableOpacity style={styles.fullBtn} onPress={handleTransmit}>
+                                <Text style={styles.gradientBtnText}>TRANSMIT (SMS)</Text>
+                            </TouchableOpacity>
+                        </LinearGradient>
 
-                        {/* SIMULATION BUTTON FOR LOCALHOST TESTING */}
                         <TouchableOpacity
-                            style={[styles.btn, { backgroundColor: '#222', borderColor: '#444', marginTop: 15 }]}
+                            style={[styles.secondaryBtn, { backgroundColor: 'transparent', borderColor: theme.secondary }]}
                             onPress={handleSimulate}
                         >
-                            <Text style={[styles.btnText, { color: theme.accent }]}>DEV: SIMULATE RELAY (HTTP)</Text>
+                            <Text style={[styles.secondaryBtnText, { color: theme.text }]}>DEV: HTTP SIMULATION</Text>
                         </TouchableOpacity>
 
-                        <TouchableOpacity onPress={() => { setSignedPayload(''); setStatus('Reset'); }} style={{ marginTop: 10 }}>
-                            <Text style={{ color: theme.subtext, textAlign: 'center', fontSize: 10 }}>[RESET PAYLOAD]</Text>
-                        </TouchableOpacity>
+                        <Text style={[styles.hashDisplay, { color: theme.secondary }]}>
+                            HASH: {signedPayload.slice(0, 20)}...
+                        </Text>
+                        <Text onPress={() => { setSignedPayload(''); setStatus('Reset'); }} style={[styles.resetLink, { color: theme.accent }]}>RESET</Text>
                     </View>
                 )}
             </View>
@@ -229,16 +254,47 @@ export const SendScreen = () => {
 };
 
 const styles = StyleSheet.create({
-    container: { width: '100%' },
-    section: { borderWidth: 1, padding: 15, marginBottom: 20, borderRadius: 4 },
-    header: { fontSize: 12, fontWeight: 'bold', marginBottom: 10, letterSpacing: 1 },
-    label: { fontSize: 10, fontWeight: 'bold', marginBottom: 4 },
-    value: { fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', fontSize: 14 },
-    input: { borderWidth: 1, padding: 10, borderRadius: 4, marginBottom: 10, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
+    container: { width: '100%', paddingBottom: 50 },
+    glassCard: {
+        borderRadius: 16,
+        marginBottom: 20,
+        overflow: 'hidden',
+        borderWidth: 1,
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.1,
+        shadowRadius: 10,
+        elevation: 4,
+    },
+    cardContent: { padding: 20 },
+    cardTitle: { fontSize: 10, fontWeight: '700', letterSpacing: 2, marginBottom: 15, opacity: 0.7 },
+
+    inputContainer: { marginBottom: 15 },
+    inputLabel: { fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 5 },
+    input: { fontSize: 16, borderBottomWidth: 1, paddingVertical: 8, fontWeight: '500' },
     row: { flexDirection: 'row' },
-    btn: { borderWidth: 1, padding: 15, alignItems: 'center', marginTop: 10 },
-    btnText: { fontWeight: 'bold', letterSpacing: 1 },
-    btnSmall: { borderWidth: 1, padding: 8, alignItems: 'center', borderStyle: 'dashed' },
-    status: { fontWeight: 'bold', fontSize: 12, marginBottom: 5 },
-    hash: { fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', fontSize: 10, marginBottom: 10 }
+
+    identityRow: { flexDirection: 'row', alignItems: 'center' },
+    avatar: { width: 36, height: 36, borderRadius: 18, marginRight: 12 },
+    address: { fontSize: 16, fontWeight: '600', letterSpacing: 0.5 },
+    statusTag: { fontSize: 10, fontWeight: 'bold', marginTop: 2, paddingLeft: 2 },
+
+    goldBtn: { borderWidth: 1, padding: 14, borderRadius: 8, alignItems: 'center', borderStyle: 'solid' },
+    goldBtnText: { fontWeight: '800', letterSpacing: 1, fontSize: 12 },
+
+    miniHeader: { fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 5, marginLeft: 5 },
+    miniInput: { borderRadius: 8, padding: 10, fontSize: 10, marginBottom: 10, overflow: 'hidden' },
+
+    actionDeck: { marginTop: 10 },
+    actionBtn: { padding: 18, borderRadius: 12, alignItems: 'center', shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { height: 4, width: 0 } },
+    actionBtnText: { fontWeight: '900', letterSpacing: 1, fontSize: 14 },
+
+    gradientBtn: { borderRadius: 12, marginTop: 10, overflow: 'hidden' },
+    fullBtn: { padding: 18, alignItems: 'center' },
+    gradientBtnText: { color: '#fff', fontWeight: '900', letterSpacing: 1 },
+
+    secondaryBtn: { padding: 15, borderRadius: 12, alignItems: 'center', marginTop: 12, borderWidth: 1 },
+    secondaryBtnText: { fontWeight: '700', fontSize: 12 },
+
+    hashDisplay: { textAlign: 'center', fontSize: 10, marginTop: 15, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
+    resetLink: { textAlign: 'center', fontSize: 11, fontWeight: 'bold', marginTop: 8 }
 });

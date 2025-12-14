@@ -1,0 +1,19 @@
+{
+    "name": "echolink-contracts",
+    "version": "1.0.0",
+    "description": "Smart contracts for EchoLink",
+    "main": "index.js",
+    "scripts": {
+        "test": "npx hardhat test",
+        "deploy:sepolia": "npx hardhat run scripts/deploy.js --network sepolia"
+    },
+    "author": "",
+    "license": "MIT",
+    "devDependencies": {
+        "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+        "hardhat": "^2.19.1"
+    },
+    "dependencies": {
+        "dotenv": "^16.3.1"
+    }
+}

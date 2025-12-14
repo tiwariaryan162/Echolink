@@ -2,7 +2,9 @@ const { ethers } = require('ethers');
 
 // In production, use a real provider (Infura, Alchemy, or user's own node)
 // For MVP, we use the default provider or a testnet
-const provider = ethers.getDefaultProvider('sepolia');
+// For MVP, we switch to Localhost to match the local deployment
+// const provider = ethers.getDefaultProvider('sepolia');
+const provider = new ethers.JsonRpcProvider('http://127.0.0.1:8545');
 
 /**
  * Broadcasts a raw signed transaction to the blockchain.

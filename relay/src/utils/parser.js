@@ -25,6 +25,11 @@ const decompressPayload = (rawBody) => {
         return null;
     }
 
+    // Re-add 0x prefix if missing (ethers requires it)
+    if (!decompressed.startsWith('0x')) {
+        return '0x' + decompressed;
+    }
+
     return decompressed;
 };
 
